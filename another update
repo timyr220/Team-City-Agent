@@ -1,0 +1,229 @@
+import requests
+import xml.etree.ElementTree as ET
+import time
+import json
+import threading
+
+TEAMCITY_URL = "https://builds.thingsboard.io/guestAuth/app/rest/agents"
+THINGSBOARD_URL = "https://thingsboard.cloud"
+THINGSBOARD_USERNAME = "nofin70706@vasomly.com"
+THINGSBOARD_PASSWORD = "123123"
+TELEGRAM_BOT_TOKEN = "7105829181:AAFWb_SxoJqoeGRjsw5trMzo6jvJGLx9y9w"
+
+DEVICES = {
+    'Danylov': {'token': 'MCXnii9eET4carv2YOMQ', 'uuid': '8f328840-45b7-11ef-b725-a360b81c6bc7'},
+    'Oleshuk': {'token': 'X6RXifwMpDvai07hO2kQ', 'uuid': 'ac247030-4da0-11ef-8773-85baf2f2f8dd'},
+    'Budanov': {'token': 'fQhEHmgvNvT8foeirhVu', 'uuid': 'a22db190-45b7-11ef-a543-f3c3f1e040a0'},
+    'Maliuk': {'token': 'Juy9f5JL3xcBSbA1elh2', 'uuid': 'b723af50-4da0-11ef-8773-85baf2f2f8dd'},
+    'Syrskyi': {'token': '1lSSF52DAiGZcJ2CEsqV', 'uuid': 'c2951130-4da0-11ef-9e37-3d8f8f84bada'},
+    'Pavliuk': {'token': 'USGiMAWuPV3hm0E5Estt', 'uuid': 'ccb784e0-4da0-11ef-a4c4-33b853ff0fe6'},
+    'AggregatedDevice': {'token': 'ZvefwHDTLOujieH66VjP', 'uuid': 'c5ba7e40-45b7-11ef-bec6-6743a7e32eb4'},
+    'TeamCity': {'token': 'EdByF8R8YrhPwfJBdvsy', 'uuid': '3db65e60-4a6c-11ef-9e37-3d8f8f84bada'}
+}
+
+users = set()  # Храним список пользователей, использующих бота
+
+# Переменная для отслеживания статуса отправки сообщения
+last_message_confirmed = True
+
+def get_thingsboard_token(url, username, password):
+    auth_url = f"{url}/api/auth/login"
+    payload = {
+        "username": username,
+        "password": password
+    }
+    try:
+        response = requests.post(auth_url, json=payload)
+        response.raise_for_status()
+        return response.json()['token']
+    except requests.exceptions.RequestException as e:
+        print(f"Error getting ThingsBoard token: {e}")
+        return None
+
+THINGSBOARD_TOKEN = get_thingsboard_token(THINGSBOARD_URL, THINGSBOARD_USERNAME, THINGSBOARD_PASSWORD)
+
+def fetch_data_from_teamcity(url):
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        return response.content
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching data from TeamCity: {e}")
+        return None
+
+def parse_agents(xml_data):
+    root = ET.fromstring(xml_data)
+    agents = []
+    for agent in root.findall('agent'):
+        agent_data = {
+            'id': agent.get('id'),
+            'name': agent.get('name')
+        }
+        agents.append(agent_data)
+    return agents
+
+def send_telemetry_to_thingsboard(device_name, key, value):
+    if device_name not in DEVICES:
+        print(f"Device name '{device_name}' not found in DEVICES.")
+        return
+
+    device_token = DEVICES[device_name]['token']
+    telemetry_url = f"{THINGSBOARD_URL}/api/v1/{device_token}/telemetry"
+    headers = {'Content-Type': 'application/json'}
+    data = {key: value}
+
+    try:
+        response = requests.post(telemetry_url, headers=headers, data=json.dumps(data))
+        if response.status_code == 200:
+            print(f"Data sent successfully to ThingsBoard for device {device_name}.")
+        else:
+            print(f"Error sending data to ThingsBoard for device {device_name}: {response.status_code} - {response.text}")
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to send data to ThingsBoard for device {device_name}: {e}")
+
+def send_aggregated_telemetry(device_name, key, value):
+    device_token = DEVICES['AggregatedDevice']['token']
+    telemetry_url = f"{THINGSBOARD_URL}/api/v1/{device_token}/telemetry"
+    headers = {'Content-Type': 'application/json'}
+    data = {f"{device_name}_{key}": value}
+
+    try:
+        response = requests.post(telemetry_url, headers=headers, data=json.dumps(data))
+        if response.status_code == 200:
+            print(f"Aggregated data sent successfully to ThingsBoard.")
+        else:
+            print(f"Error sending aggregated data to ThingsBoard: {response.status_code} - {response.text}")
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to send aggregated data to ThingsBoard: {e}")
+
+def create_alarm_in_thingsboard(device_id, alarm_data):
+    alarm_url = f"{THINGSBOARD_URL}/api/alarm"
+    headers = {
+        'Content-Type': 'application/json',
+        'X-Authorization': f'Bearer {THINGSBOARD_TOKEN}'
+    }
+
+    try:
+        response = requests.post(alarm_url, headers=headers, data=json.dumps(alarm_data))
+        if response.status_code == 200:
+            print(f"Alarm created successfully in ThingsBoard for device {device_id}.")
+        else:
+            print(f"Error creating alarm in ThingsBoard for device {device_id}: {response.status_code} - {response.text}")
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to create alarm in ThingsBoard for device {device_id}: {e}")
+
+def send_telegram_notification(message):
+    global last_message_confirmed
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    for chat_id in list(users):  # для безопасного изменения
+        payload = {
+            "chat_id": chat_id,
+            "text": message
+        }
+        try:
+            response = requests.post(url, json=payload)
+            if response.status_code == 200:
+                print(f"Notification sent successfully to Telegram user {chat_id}.")
+                last_message_confirmed = True  # Подтверждение получения сообщения
+            elif response.status_code == 403 and "bot was kicked" in response.text:
+                print(f"Bot was kicked from chat {chat_id}. Removing from user list.")
+                users.remove(chat_id)
+            else:
+                print(f"Error sending notification to Telegram user {chat_id}: {response.status_code} - {response.text}")
+                last_message_confirmed = False  # Ошибка при отправке
+        except requests.exceptions.RequestException as e:
+            print(f"Failed to send notification to Telegram user {chat_id}: {e}")
+            last_message_confirmed = False  # Ошибка при отправке
+
+def get_telegram_chat_ids():
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        updates = response.json()
+        print(f"Telegram updates: {json.dumps(updates, indent=4)}")
+        for update in updates.get('result', []):
+            if 'message' in update:
+                chat_id = update['message']['chat']['id']
+                users.add(chat_id)
+                print(f"Chat ID found and added: {chat_id}")
+    except requests.exceptions.RequestException as e:
+        print(f"Error getting Telegram updates: {e}")
+
+def periodic_alive_message():
+    global last_message_confirmed
+    while True:
+        if last_message_confirmed:
+            last_message_confirmed = False
+            send_telegram_notification("Я жива!")
+        time.sleep(1080)  # 18 мин
+
+def check_teamcity_status():
+    while True:
+        try:
+            response = requests.get(TEAMCITY_URL)
+            if response.status_code == 200:
+                send_telemetry_to_thingsboard('TeamCity', 'status', 1)
+            else:
+                send_telemetry_to_thingsboard('TeamCity', 'status', 0)
+        except requests.exceptions.RequestException as e:
+            print(f"Error checking TeamCity status: {e}")
+            send_telemetry_to_thingsboard('TeamCity', 'status', 0)
+
+        time.sleep(300)  # Check every 5 minutes
+
+def main():
+    get_telegram_chat_ids()
+    if not users:
+        print("Failed to get any Telegram chat_id. Exit...")
+        return
+
+    # поток для периодических сообщений
+    threading.Thread(target=periodic_alive_message, daemon=True).start()
+    threading.Thread(target=check_teamcity_status, daemon=True).start()
+
+    while True:  # основа
+        all_agents = fetch_data_from_teamcity(TEAMCITY_URL)
+        online_agents = fetch_data_from_teamcity(f"{TEAMCITY_URL}?locator=connected:true")
+        offline_agents = fetch_data_from_teamcity(f"{TEAMCITY_URL}?locator=connected:false")
+
+        if all_agents:
+            all_agents_data = parse_agents(all_agents)
+            print(f"Number of all agents: {len(all_agents_data)}")
+
+        if online_agents:
+            online_agents_data = parse_agents(online_agents)
+            print(f"Number of online agents: {len(online_agents_data)}")
+
+        if offline_agents:
+            offline_agents_data = parse_agents(offline_agents)
+            print(f"Number of offline agents: {len(offline_agents_data)}")
+
+        for agent in all_agents_data:
+            agent_name = agent['name']
+            if agent_name in DEVICES and agent_name != 'AggregatedDevice':
+                is_online = any(agent['name'] == agent_name for agent in online_agents_data)
+                if is_online:
+                    send_telemetry_to_thingsboard(agent_name, 'online', 1)
+                    send_telemetry_to_thingsboard(agent_name, 'offline', 0)
+                else:
+                    send_telemetry_to_thingsboard(agent_name, 'offline', 1)
+                    send_telemetry_to_thingsboard(agent_name, 'online', 0)
+                    alarm_data = {
+                        "originator": {
+                            "entityType": "DEVICE",
+                            "id": DEVICES[agent_name]['uuid']
+                        },
+                        "type": "OfflineAgentsAlarm",
+                        "severity": "CRITICAL",
+                        "status": "ACTIVE_UNACK",
+                        "details": {
+                            "offline_agents": [agent_name]
+                        }
+                    }
+                    create_alarm_in_thingsboard(agent_name, alarm_data)
+
+        time.sleep(300)
+
+if __name__ == "__main__":
+    main()
